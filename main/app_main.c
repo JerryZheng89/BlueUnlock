@@ -32,6 +32,9 @@
 #include "lwip/dns.h"
 #include "lwip/netdb.h"
 
+#include "cJSON.h"
+#include "cJSON_Utils.h"
+
 #include "esp_log.h"
 #include "mqtt_client.h"
 #include "driver/gpio.h"
@@ -52,6 +55,7 @@ static const char *TAG = "BLUE_UNLOCK";
 static EventGroupHandle_t s_wifi_event_group;
 /* key press event queue */
 static xQueueHandle gpio_evt_queue = NULL;
+static xQueueHandle message_evt_queue = NULL;
 
 /* The event group allows multiple bits for each event,
    but we only care about one event - are we connected
@@ -62,6 +66,10 @@ static const int WIFI_START_BIT = BIT2;
 static const int CONFIG_START_BIT = BIT3;
 /* smartconfig task */
 static void smartconfig_example_task(void * parm);
+
+/* extern call function */
+extern void  initialize_ble_cleint(void);
+
 
 
 static void IRAM_ATTR gpio_isr_handler(void* arg)
@@ -229,6 +237,16 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
             ESP_LOGI(TAG, "MQTT_EVENT_DATA");
             printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
             printf("DATA=%.*s\r\n", event->data_len, event->data);
+            cJSON *parseData = cJSON_Parse(event->data);
+
+            if (parseData !=NULL) {
+                char *jsonString= cJSON_Print(parseData);
+                printf("JSON parse out:%s\n", jsonString);
+                cJSON_free(jsonString);
+                cJSON *msgNum = cJSON_GetObjectItem(parseData, "msg");
+                printf("msg=%2f\n", cJSON_GetNumberValue(msgNum));
+                cJSON_Delete(parseData);
+            }
             break;
         case MQTT_EVENT_ERROR:
             ESP_LOGI(TAG, "MQTT_EVENT_ERROR");
@@ -364,14 +382,24 @@ void app_main(void)
     esp_log_level_set("TRANSPORT", ESP_LOG_VERBOSE);
     esp_log_level_set("OUTBOX", ESP_LOG_VERBOSE);
 
-    ESP_ERROR_CHECK(nvs_flash_init());
-    // ESP_ERROR_CHECK(esp_netif_init());
-    // ESP_ERROR_CHECK(esp_event_loop_create_default());
+    // Initialize NVS.
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK( ret );       
+
     initialise_wifi();
+
     gpio_evt_queue = xQueueCreate(10, sizeof(uint32_t));
+    message_evt_queue = xQueueCreate(10, sizeof(uint32_t));
+
     initialize_button();
     initialize_led();
     xTaskCreate(button_scan_task, "config button scan", 2000, NULL, 2, NULL);
+
+    // xTaskCreate()
 
     EventBits_t uxBits;
     uxBits = xEventGroupWaitBits(s_wifi_event_group, WIFI_START_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
@@ -384,6 +412,8 @@ void app_main(void)
     if (uxBits & CONNECTED_BIT) {
         mqtt_app_start();
     }
+
+    initialize_ble_cleint();
     /* This helper function configures Wi-Fi or Ethernet, as selected in menuconfig.
      * Read "Establishing Wi-Fi or Ethernet Connection" section in
      * examples/protocols/README.md for more information about this function.
