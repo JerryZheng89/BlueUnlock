@@ -57,6 +57,8 @@ static EventGroupHandle_t s_wifi_event_group;
 static xQueueHandle gpio_evt_queue = NULL;
 static xQueueHandle message_evt_queue = NULL;
 
+extern xQueueHandle server_msg_queue;
+
 /* The event group allows multiple bits for each event,
    but we only care about one event - are we connected
    to the AP with an IP? */
@@ -68,7 +70,7 @@ static const int CONFIG_START_BIT = BIT3;
 static void smartconfig_example_task(void * parm);
 
 /* extern call function */
-extern void  initialize_ble_cleint(void);
+extern void  initialize_ble_client(void);
 
 
 
@@ -217,6 +219,10 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
             msg_id = esp_mqtt_client_subscribe(client, "/topic/qos0", 1);
             ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
 
+            ESP_LOGI(TAG, "MQTT_EVENT_SUBSCRIBED, msg_id=%d", event->msg_id);
+            msg_id = esp_mqtt_client_publish(client, "/topic/qos1", "data", 0, 1, 0);
+            ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+
             break;
         case MQTT_EVENT_DISCONNECTED:
             ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
@@ -224,8 +230,7 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
 
         case MQTT_EVENT_SUBSCRIBED:
             ESP_LOGI(TAG, "MQTT_EVENT_SUBSCRIBED, msg_id=%d", event->msg_id);
-            msg_id = esp_mqtt_client_publish(client, "/topic/qos1", "data", 0, 1, 0);
-            ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+
             break;
         case MQTT_EVENT_UNSUBSCRIBED:
             ESP_LOGI(TAG, "MQTT_EVENT_UNSUBSCRIBED, msg_id=%d", event->msg_id);
@@ -240,11 +245,16 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
             cJSON *parseData = cJSON_Parse(event->data);
 
             if (parseData !=NULL) {
+                char *lockMacString;
                 char *jsonString= cJSON_Print(parseData);
                 printf("JSON parse out:%s\n", jsonString);
                 cJSON_free(jsonString);
-                cJSON *msgNum = cJSON_GetObjectItem(parseData, "msg");
-                printf("msg=%2f\n", cJSON_GetNumberValue(msgNum));
+                cJSON *lockMac = cJSON_GetObjectItem(parseData, "lockMac");
+                if (lockMac!= NULL) {
+                    lockMacString = cJSON_GetStringValue(lockMac);
+                    printf("lockMac %s.\n", lockMacString);
+                    xQueueSend(server_msg_queue, &lockMacString, 10/portTICK_PERIOD_MS); 
+                }
                 cJSON_Delete(parseData);
             }
             break;
@@ -266,6 +276,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 static void mqtt_app_start(void)
 {
     esp_mqtt_client_config_t mqtt_cfg = {
+        .client_id = "ESP32-47f9-95d6-2a25ae44dbf1",
         .uri = CONFIG_BROKER_URL,
         .port = 1883,
     };
@@ -393,7 +404,7 @@ void app_main(void)
     initialise_wifi();
 
     gpio_evt_queue = xQueueCreate(10, sizeof(uint32_t));
-    message_evt_queue = xQueueCreate(10, sizeof(uint32_t));
+    message_evt_queue = xQueueCreate(50, sizeof(uint32_t));
 
     initialize_button();
     initialize_led();
@@ -413,12 +424,11 @@ void app_main(void)
         mqtt_app_start();
     }
 
-    initialize_ble_cleint();
+    initialize_ble_client();
     /* This helper function configures Wi-Fi or Ethernet, as selected in menuconfig.
      * Read "Establishing Wi-Fi or Ethernet Connection" section in
      * examples/protocols/README.md for more information about this function.
      */
     //ESP_ERROR_CHECK(example_connect());
 
-    //mqtt_app_start();
 }

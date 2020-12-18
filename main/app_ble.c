@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <time.h>
 #include "nvs.h"
 #include "nvs_flash.h"
 
@@ -16,8 +17,10 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "driver/gpio.h"
+#include "mbedtls/aes.h"
 
 #define GATTC_TAG "GATTC_DEMO"
+
 #define REMOTE_SERVICE_UUID         {0x23, 0xD1, 0xBC, 0xEA, 0x5F, 0x78, 0x23, 0x15, \
                                      0xDE, 0xEF, 0x12, 0x12, 0x23, 0x15, 0x00, 0x00}
                                         //0x00FF
@@ -41,18 +44,23 @@ typedef struct {
 }led_blink_args_t;
 
 static const char remote_device_name[] = "Nordic_Blinky";
+static char remote_device_mac[] = "c9:a7:ab:5e:2d:be";
 static bool connect    = false;
 static bool get_server = false;
 static esp_gattc_char_elem_t *char_elem_result   = NULL;
 static esp_gattc_descr_elem_t *descr_elem_result = NULL;
 /* led blink task */
-static TaskHandle_t led_task_handle = NULL;
-static led_blink_args_t xLEDTaskArgs;
+// static TaskHandle_t led_task_handle = NULL;
+// static led_blink_args_t xLEDTaskArgs;
+/* aces key */
+static const uint8_t key[17] = "Y4b711C7V0U4Mnl9";
+// static uint8_t timeStamp[9]={0};
+static void macStrTobuffer(char *mac, uint8_t *buffer);
 
 /* openLock task */
 static xQueueHandle ble_evt_queue = NULL;
-static xQueueHandle server_msg_queue = NULL;
 static xQueueHandle timeOut_sig_queue = NULL;
+xQueueHandle server_msg_queue = NULL;
 
 /* Declare static functions */
 static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param);
@@ -61,7 +69,8 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
 /* blink the led of ble client */
 static void ble_openLock_task(void *arg);
 extern int system_get_time_ms(void);
-
+extern void esp_wait_sntp_sync(void);
+extern void esp_initialize_sntp(void);
 
 
 static esp_bt_uuid_t remote_filter_service_uuid = {
@@ -88,9 +97,9 @@ static esp_bt_uuid_t notify_descr_uuid = {
 static esp_ble_scan_params_t ble_scan_params = {
     .scan_type              = BLE_SCAN_TYPE_ACTIVE,
     .own_addr_type          = BLE_ADDR_TYPE_PUBLIC,
-    .scan_filter_policy     = BLE_SCAN_FILTER_ALLOW_ALL,
-    .scan_interval          = 0x50,
-    .scan_window            = 0x30,
+    .scan_filter_policy     = BLE_SCAN_FILTER_ALLOW_ONLY_WLST,//BLE_SCAN_FILTER_ALLOW_ALL,
+    .scan_interval          = 0x58,   // 100ms
+    .scan_window            = 0x58,   // 100ms
     .scan_duplicate         = BLE_SCAN_DUPLICATE_DISABLE
 };
 
@@ -135,7 +144,6 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
     p_data->gattc_if = gattc_if;
     memcpy(&(p_data->gattc_param), param, sizeof(esp_ble_gattc_cb_param_t));
 
-    ESP_LOGI(GATTC_TAG, "gattc event");
     if (xQueueSend(ble_evt_queue, (void *)&p_data, 20/portTICK_PERIOD_MS) != pdTRUE) {
         ESP_LOGE(GATTC_TAG, "gattc event send failed!!!");
     }
@@ -148,7 +156,6 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
     p_data->gap_event = event;
     memcpy(&(p_data->gap_param), param, sizeof(esp_ble_gap_cb_param_t));
 
-    ESP_LOGI(GATTC_TAG, "gap event");
     if (xQueueSend(ble_evt_queue, (void *)&p_data, 20/portTICK_PERIOD_MS) != pdTRUE) {
         ESP_LOGE(GATTC_TAG, "gap event send failed!!!");
     }
@@ -183,17 +190,30 @@ static void esp_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp
     } while (0);
 }
 
+static void sync_sntp_task(void *arg)
+{
+    esp_initialize_sntp();
+    for (;;) {
+        esp_wait_sntp_sync();
+        vTaskDelay(1000/portTICK_PERIOD_MS);
+    }
+}
+
+
 static void ble_openLock_task(void *arg)
 {
     ble_event_data_t *eventMsg;
     BaseType_t result;
     uint8_t *adv_name = NULL;
     uint8_t adv_name_len = 0;
+    uint8_t cipher[17] = {0};
+    uint8_t plain[17] = "5FD849CE00000101";
+    mbedtls_aes_context ctx; 
 
     static QueueSetHandle_t xQueueSet = NULL;
     QueueHandle_t xQueueContainsData;
     
-    xQueueSet = xQueueCreateSet(3);
+    xQueueSet = xQueueCreateSet(16);  //ble_evnt_queue(10)+server_msg_queue(5)+timeOut_sig_queue(1) = 16
     xQueueAddToSet(ble_evt_queue, xQueueSet);
     xQueueAddToSet(server_msg_queue, xQueueSet);
     xQueueAddToSet(timeOut_sig_queue, xQueueSet);
@@ -203,7 +223,6 @@ static void ble_openLock_task(void *arg)
     vTaskDelay(2000/portTICK_PERIOD_MS);
 
     while (1) {
-        ESP_LOGI(GATTC_TAG, "queueset wait event");
         xQueueContainsData = ( QueueHandle_t )xQueueSelectFromSet(xQueueSet, portMAX_DELAY);
 
         if (xQueueContainsData == ble_evt_queue) {
@@ -216,10 +235,10 @@ static void ble_openLock_task(void *arg)
                     switch (eventMsg->gattc_event) {
                         case ESP_GATTC_REG_EVT: {
                             ESP_LOGI(GATTC_TAG, "esp gattc REG_EVT");
-                            esp_err_t scan_ret = esp_ble_gap_set_scan_params(&ble_scan_params);
-                            if (scan_ret){
-                                ESP_LOGE(GATTC_TAG, "set scan params error, error code = %x", scan_ret);
-                            }
+                            // esp_err_t scan_ret = esp_ble_gap_set_scan_params(&ble_scan_params);
+                            // if (scan_ret){
+                                // ESP_LOGE(GATTC_TAG, "set scan params error, error code = %x", scan_ret);
+                            // }
                             break;
                         }
 
@@ -447,11 +466,40 @@ static void ble_openLock_task(void *arg)
                                                                 remote_filter_led_char_uuid,
                                                                 char_elem_result,
                                                                 &count);
-                            xLEDTaskArgs.gattc_if = eventMsg->gattc_if;
-                            xLEDTaskArgs.conn_id  = gl_profile_tab[PROFILE_A_APP_ID].conn_id;
-                            xLEDTaskArgs.char_handle = char_elem_result[0].char_handle;
-                            free(char_elem_result);
                             // xTaskCreate(led_blink_task, "led blink", configMINIMAL_STACK_SIZE*3, (void *)&xLEDTaskArgs, 5, &led_task_handle);
+                            char unEncryptData[17];
+                            time_t now;
+                            time(&now);
+                            sprintf(unEncryptData, "%02X%02X%02X%02X", 
+                                                    (uint8_t)(now>>24), 
+                                                    (uint8_t)((now>>16)&0xff), 
+                                                    (uint8_t)((now>>8)&0xff), 
+                                                    (uint8_t)((now)&0xff));
+
+                            memcpy(unEncryptData+8, "jerryA0A", 9);
+                            ESP_LOGI(GATTC_TAG, "time is %ld, plainData:%s", (long)now, unEncryptData);
+
+                            memset(cipher, 0, 17);
+                            mbedtls_aes_init(&ctx);
+                            mbedtls_aes_setkey_enc(&ctx, key, 128);
+                            mbedtls_aes_crypt_ecb(&ctx, MBEDTLS_AES_ENCRYPT,(const uint8_t *)unEncryptData, cipher);
+                            mbedtls_aes_free(&ctx);
+
+                            ret_status = esp_ble_gattc_write_char( eventMsg->gattc_if,
+                                                                   gl_profile_tab[PROFILE_A_APP_ID].conn_id,
+                                                                   char_elem_result[0].char_handle,
+                                                                   16, //sizeof(led_en),
+                                                                   cipher, //&len_en,
+                                                                   ESP_GATT_WRITE_TYPE_RSP,
+                                                                   ESP_GATT_AUTH_REQ_NONE );
+                            
+                            if (ret_status != ESP_GATT_OK){
+                                ESP_LOGE(GATTC_TAG, "esp led_on write_char error");
+                            }
+
+                            vTaskDelay(20/portTICK_PERIOD_MS);
+                            free(char_elem_result);
+                            esp_ble_gattc_close(eventMsg->gattc_if, gl_profile_tab[PROFILE_A_APP_ID].conn_id);
                             #endif
                             break;
                         }
@@ -504,10 +552,13 @@ static void ble_openLock_task(void *arg)
                             break;
                         }
                         case ESP_GAP_BLE_SCAN_RESULT_EVT: {
+                            char *mac = malloc(18);
                             esp_ble_gap_cb_param_t *scan_result = (esp_ble_gap_cb_param_t *)&(eventMsg->gap_param);
                             switch (scan_result->scan_rst.search_evt) {
                             case ESP_GAP_SEARCH_INQ_RES_EVT:
-                                esp_log_buffer_hex(GATTC_TAG, scan_result->scan_rst.bda, 6);
+                                // esp_log_buffer_hex(GATTC_TAG, scan_result->scan_rst.bda, 6);
+                                memset(mac, 0, 18);
+                                sprintf(mac, MACSTR, MAC2STR(scan_result->scan_rst.bda));
                                 ESP_LOGI(GATTC_TAG, "searched Adv Data Len %d, Scan Response Len %d", scan_result->scan_rst.adv_data_len, scan_result->scan_rst.scan_rsp_len);
                                 adv_name = esp_ble_resolve_adv_data(scan_result->scan_rst.ble_adv,
                                                                     ESP_BLE_AD_TYPE_NAME_CMPL, &adv_name_len);
@@ -529,20 +580,26 @@ static void ble_openLock_task(void *arg)
                                 if (adv_name != NULL) {
                                     if (strlen(remote_device_name) == adv_name_len && strncmp((char *)adv_name, remote_device_name, adv_name_len) == 0) {
                                         ESP_LOGI(GATTC_TAG, "searched device %s\n", remote_device_name);
-                                        if (connect == false) {
-                                            connect = true;
-                                            ESP_LOGI(GATTC_TAG, "connect to the remote device.");
-                                            esp_ble_gap_stop_scanning();
-                                            esp_ble_gattc_open(gl_profile_tab[PROFILE_A_APP_ID].gattc_if, scan_result->scan_rst.bda, scan_result->scan_rst.ble_addr_type, true);
+                                            ESP_LOGI(GATTC_TAG, "mac %s, bda %s\n", remote_device_mac, mac);
+                                        if (strncmp(mac, remote_device_mac, 18) == 0) {
+                                            ESP_LOGI(GATTC_TAG, "searched device mac %s\n", remote_device_mac);
+                                            if (connect == false) {
+                                                connect = true;
+                                                ESP_LOGI(GATTC_TAG, "connect to the remote device.");
+                                                esp_ble_gap_stop_scanning();
+                                                esp_ble_gattc_open(gl_profile_tab[PROFILE_A_APP_ID].gattc_if, scan_result->scan_rst.bda, scan_result->scan_rst.ble_addr_type, true);
+                                            }
                                         }
                                     }
                                 }
+
                                 break;
                             case ESP_GAP_SEARCH_INQ_CMPL_EVT:
                                 break;
                             default:
                                 break;
                             }
+                            free(mac);
                             break;
                         }
 
@@ -571,7 +628,32 @@ static void ble_openLock_task(void *arg)
                                       eventMsg->gap_param.update_conn_params.latency,
                                       eventMsg->gap_param.update_conn_params.timeout);
                             break;
+                        case ESP_GAP_BLE_AUTH_CMPL_EVT: 
+                            ESP_LOGI(GATTC_TAG, "ESP_GAP_BLE_AUTH_CMPL_EVT");
+                            /***************************
+                             * set scan white list
+                             */
+                            uint8_t *remote_bda;
+                            uint16_t listLength = 0;
+                            remote_bda = pvPortMalloc(6);
+                            macStrTobuffer(remote_device_mac, remote_bda);
+                            ESP_ERROR_CHECK(esp_ble_gap_clear_whitelist());
+                            vTaskDelay(20/portTICK_PERIOD_MS);
+                            ESP_ERROR_CHECK(esp_ble_gap_get_whitelist_size(&listLength));
+                            ESP_LOGI(GATTC_TAG, "set whitelist,%d",listLength);
+                            listLength = 0;
+                            esp_log_buffer_hex(GATTC_TAG, remote_bda, sizeof(esp_bd_addr_t));
+                            ESP_ERROR_CHECK(esp_ble_gap_update_whitelist(pdTRUE, remote_bda, BLE_WL_ADDR_TYPE_PUBLIC));
+                            vTaskDelay(20/portTICK_PERIOD_MS);
+                            ESP_ERROR_CHECK(esp_ble_gap_get_whitelist_size(&listLength));
+                            ESP_LOGI(GATTC_TAG, "after set,%d",listLength);
 
+                            memset(remote_bda, 0, 6);
+                            esp_read_mac(remote_bda,2);
+                            ESP_LOGI(GATTC_TAG, "Local BLE MAC address:");
+                            esp_log_buffer_hex(GATTC_TAG, remote_bda, sizeof(esp_bd_addr_t));
+                            free(remote_bda);
+                            break;             
                         default:
                             break;
                     }
@@ -579,36 +661,76 @@ static void ble_openLock_task(void *arg)
                 } 
             } 
             vPortFree(eventMsg);
-        } 
+        } else if (xQueueContainsData == server_msg_queue) {
+            char *mac=NULL;
+
+            result = xQueueReceive(server_msg_queue, &mac, 0);
+            if (result == pdTRUE) {
+                memcpy(remote_device_mac, mac, 18);
+                ESP_LOGI(GATTC_TAG, "server cmmand start to unlock the mac %s", remote_device_mac);
+
+
+
+                ESP_LOGI(GATTC_TAG, "set scan parameters");
+                esp_err_t scan_ret = esp_ble_gap_set_scan_params(&ble_scan_params);
+                if (scan_ret){
+                    ESP_LOGE(GATTC_TAG, "set scan params error, error code = %x", scan_ret);
+                }
+            }
+
+
+            mbedtls_aes_init(&ctx);
+            if (mbedtls_aes_setkey_enc(&ctx, key, 128) == 0) {
+                ESP_LOGI(GATTC_TAG, "Before Encrypt:%s", plain);
+                mbedtls_aes_crypt_ecb(&ctx, MBEDTLS_AES_ENCRYPT, plain, cipher);
+                memset(plain, 0, 17); //clear plain
+                mbedtls_aes_setkey_dec(&ctx, key, 128);
+                mbedtls_aes_crypt_ecb(&ctx, MBEDTLS_AES_DECRYPT, cipher, plain);
+                ESP_LOGI(GATTC_TAG, "After Decrypt:%s", plain);
+
+            }
+            mbedtls_aes_free(&ctx);
+        }
     }
-    // led_blink_args_t *pxLEDTaskArgs = (led_blink_args_t *)arg;
-    // uint8_t led_en = 1;
-    // esp_gatt_status_t ret_status;
-    // ESP_LOGE(GATTC_TAG, "led blink task is started!");
-    // for (;;){
-        // vTaskDelay(500/portTICK_PERIOD_MS);
-        // ret_status = esp_ble_gattc_write_char(   pxLEDTaskArgs->gattc_if,
-                                    // pxLEDTaskArgs->conn_id,
-                                    // pxLEDTaskArgs->char_handle,
-                                    // sizeof(led_en),
-                                    // (uint8_t *)&led_en,
-                                    // ESP_GATT_WRITE_TYPE_RSP,
-                                    // ESP_GATT_AUTH_REQ_NONE );
-        // ESP_LOGE(GATTC_TAG, "set remote nordic board led:%s", (led_en > 0)?"on":"off");
-        // led_en = (led_en > 0)?0:1;
-        // if (ret_status != ESP_OK){
-            // ESP_LOGE(GATTC_TAG, "set noridc led failed, exit blink task!");
-            // break;
-        // }
-    // }
+
     vTaskDelete(NULL);
 }
 
-void  initialize_ble_cleint(void)
+
+static int8_t charHexToByte(char hex)
+{
+    int8_t data = -1;
+    if (hex >= '0' && hex <= '9')
+        data = hex - '0';
+    else if (hex >= 'a' && hex <= 'f')
+        data = hex - 'a' + 10;
+    else if (hex >= 'A' && hex <= 'F')
+        data = hex - 'A' + 10;
+
+    return data;
+}
+
+static void macStrTobuffer(char *mac, uint8_t *buffer) 
+{
+    int8_t hexL;
+    int8_t hexH;
+    int j = 0;
+    for (int i=0; i<17; i++) {
+        hexH = charHexToByte(mac[i]);
+        hexL = charHexToByte(mac[i+1]);
+        if(hexL >0 && hexH >0) {
+            buffer[j++] = (hexH<<4) + hexL;
+        }
+        i=i+2;
+    }
+}
+
+
+void  initialize_ble_client(void)
 {
     esp_err_t ret;
 
-    ble_evt_queue = xQueueCreate(20, sizeof(uint32_t));
+    ble_evt_queue = xQueueCreate(10, sizeof(uint32_t));
     if (ble_evt_queue == NULL){
         ESP_LOGE(GATTC_TAG, "queue create failed");
         return;
@@ -659,7 +781,11 @@ void  initialize_ble_cleint(void)
         return;
     }
 
-    if (xTaskCreate(ble_openLock_task, "ble openLock", 0x800, NULL, 7, NULL) != pdPASS){
+    if (xTaskCreate(ble_openLock_task, "ble openLock", 0x900, NULL, 7, NULL) != pdPASS){
+        ESP_LOGE(GATTC_TAG, "create task failed");
+    }
+
+    if (xTaskCreate(sync_sntp_task, "snyc sntp", 0x800, NULL, 5, NULL) != pdPASS){
         ESP_LOGE(GATTC_TAG, "create task failed");
     }
 
