@@ -542,6 +542,15 @@ static void ble_openLock_task(void *arg)
                             ESP_LOGI(GATTC_TAG, "start scan %ds", duration);
                             break;
                         }
+
+                        case ESP_GAP_BLE_UPDATE_WHITELIST_COMPLETE_EVT:{
+                            esp_err_t scan_ret = esp_ble_gap_set_scan_params(&ble_scan_params);
+                            if (scan_ret){
+                                ESP_LOGE(GATTC_TAG, "set scan params error, error code = %x", scan_ret);
+                            }
+                            break;
+                        }
+
                         case ESP_GAP_BLE_SCAN_START_COMPLETE_EVT: {
                             //scan start complete event to indicate scan start successfully or failed
                             if (eventMsg->gap_param.scan_start_cmpl.status != ESP_BT_STATUS_SUCCESS) {
@@ -595,6 +604,7 @@ static void ble_openLock_task(void *arg)
 
                                 break;
                             case ESP_GAP_SEARCH_INQ_CMPL_EVT:
+                                ESP_LOGI(GATTC_TAG, "serach inquery complete!");
                                 break;
                             default:
                                 break;
@@ -630,29 +640,6 @@ static void ble_openLock_task(void *arg)
                             break;
                         case ESP_GAP_BLE_AUTH_CMPL_EVT: 
                             ESP_LOGI(GATTC_TAG, "ESP_GAP_BLE_AUTH_CMPL_EVT");
-                            /***************************
-                             * set scan white list
-                             */
-                            uint8_t *remote_bda;
-                            uint16_t listLength = 0;
-                            remote_bda = pvPortMalloc(6);
-                            macStrTobuffer(remote_device_mac, remote_bda);
-                            ESP_ERROR_CHECK(esp_ble_gap_clear_whitelist());
-                            vTaskDelay(20/portTICK_PERIOD_MS);
-                            ESP_ERROR_CHECK(esp_ble_gap_get_whitelist_size(&listLength));
-                            ESP_LOGI(GATTC_TAG, "set whitelist,%d",listLength);
-                            listLength = 0;
-                            esp_log_buffer_hex(GATTC_TAG, remote_bda, sizeof(esp_bd_addr_t));
-                            ESP_ERROR_CHECK(esp_ble_gap_update_whitelist(pdTRUE, remote_bda, BLE_WL_ADDR_TYPE_PUBLIC));
-                            vTaskDelay(20/portTICK_PERIOD_MS);
-                            ESP_ERROR_CHECK(esp_ble_gap_get_whitelist_size(&listLength));
-                            ESP_LOGI(GATTC_TAG, "after set,%d",listLength);
-
-                            memset(remote_bda, 0, 6);
-                            esp_read_mac(remote_bda,2);
-                            ESP_LOGI(GATTC_TAG, "Local BLE MAC address:");
-                            esp_log_buffer_hex(GATTC_TAG, remote_bda, sizeof(esp_bd_addr_t));
-                            free(remote_bda);
                             break;             
                         default:
                             break;
@@ -670,12 +657,30 @@ static void ble_openLock_task(void *arg)
                 ESP_LOGI(GATTC_TAG, "server cmmand start to unlock the mac %s", remote_device_mac);
 
 
+                /***************************
+                 * set scan white list
+                 */
+                uint8_t *remote_bda;
+                uint16_t listLength = 0;
+                remote_bda = pvPortMalloc(6);
+                macStrTobuffer(remote_device_mac, remote_bda);
+                // ESP_ERROR_CHECK(esp_ble_gap_clear_whitelist());
+                vTaskDelay(20/portTICK_PERIOD_MS);
+                ESP_ERROR_CHECK(esp_ble_gap_get_whitelist_size(&listLength));
+                ESP_LOGI(GATTC_TAG, "set whitelist,%d",listLength);
+                listLength = 0;
+                esp_log_buffer_hex(GATTC_TAG, remote_bda, sizeof(esp_bd_addr_t));
+                ESP_ERROR_CHECK(esp_ble_gap_update_whitelist(pdTRUE, remote_bda, BLE_WL_ADDR_TYPE_RANDOM));
+                vTaskDelay(20/portTICK_PERIOD_MS);
+                ESP_ERROR_CHECK(esp_ble_gap_get_whitelist_size(&listLength));
+                ESP_LOGI(GATTC_TAG, "after set,%d",listLength);
 
-                ESP_LOGI(GATTC_TAG, "set scan parameters");
-                esp_err_t scan_ret = esp_ble_gap_set_scan_params(&ble_scan_params);
-                if (scan_ret){
-                    ESP_LOGE(GATTC_TAG, "set scan params error, error code = %x", scan_ret);
-                }
+                memset(remote_bda, 0, 6);
+                esp_read_mac(remote_bda,2);
+                ESP_LOGI(GATTC_TAG, "Local BLE MAC address:");
+                esp_log_buffer_hex(GATTC_TAG, remote_bda, sizeof(esp_bd_addr_t));
+                free(remote_bda);
+
             }
 
 

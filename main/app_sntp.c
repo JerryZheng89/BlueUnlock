@@ -16,6 +16,11 @@ void esp_initialize_sntp(void)
     sntp_init();
 }
 
+void stopSNTP(void)
+{
+	sntp_stop();
+}
+
 void esp_wait_sntp_sync(void)
 {
     char strftime_buf[64];
